@@ -28,8 +28,6 @@
 using System;
 using System.IO;
 using System.Net;
-using System.Threading;
-using System.Threading.Tasks;
 
 using BetterCms.Core.Services.Storage;
 using BetterCms.Module.WindowsAzureStorage.Content.Resources;
@@ -42,313 +40,318 @@ using StorageException = BetterCms.Core.Exceptions.Service.StorageException;
 
 namespace BetterCms.Module.WindowsAzureStorage
 {
-    public class WindowsAzureStorageService : IStorageService
-    {
-        private readonly CloudStorageAccount cloudStorageAccount;
+	public class WindowsAzureStorageService : IStorageService
+	{
+		private readonly CloudStorageAccount cloudStorageAccount;
 
-        private readonly string containerName;
-        
-        private readonly string securedContainerName;
+		private readonly string containerName;
 
-        private readonly bool accessControlEnabledGlobally;
-        
-        private readonly TimeSpan tokenExpiryTime;
+		private readonly string securedContainerName;
 
-        private TimeSpan timeout;
+		private readonly bool accessControlEnabledGlobally;
 
-        private string securedContainerIssue;
+		private readonly TimeSpan tokenExpiryTime;
 
-        // Allow resource to be cached by any cache for 7 days:
-        private const string CacheControl = "public, max-age=604800";
+		private TimeSpan timeout;
 
-        public TimeSpan Timeout
-        {
-            get { return timeout; }
-            set { timeout = value; }
-        }
+		private string securedContainerIssue;
 
-        public WindowsAzureStorageService(ICmsConfiguration config)
-        {
-            try
-            {
-                var serviceSection = config.Storage;
-                string accountName = serviceSection.GetValue("AzureAccountName");
-                string secretKey = serviceSection.GetValue("AzureSecondaryKey");
-                bool useHttps = bool.Parse(serviceSection.GetValue("AzureUseHttps"));
+		// Allow resource to be cached by any cache for 7 days:
+		private const string CacheControl = "public, max-age=604800";
 
-                if (!TimeSpan.TryParse(serviceSection.GetValue("AzureTokenExpiryTime"), out tokenExpiryTime))
-                {
-                    tokenExpiryTime = TimeSpan.FromMinutes(10);
-                }
+		public TimeSpan Timeout
+		{
+			get { return timeout; }
+			set { timeout = value; }
+		}
 
-                timeout = serviceSection.ProcessTimeout;
-                
-                accessControlEnabledGlobally = config.Security.AccessControlEnabled;
-                containerName = serviceSection.GetValue("AzureContainerName");
-                securedContainerName = serviceSection.GetValue("AzureSecuredContainerName");
-                if (string.IsNullOrWhiteSpace(securedContainerName))
-                {
-                    securedContainerName = containerName;
-                }
+		public WindowsAzureStorageService(ICmsConfiguration config)
+		{
+			try
+			{
+				var serviceSection = config.Storage;
+				string accountName = serviceSection.GetValue("AzureAccountName");
+				string secretKey = serviceSection.GetValue("AzureSecondaryKey");
+				bool useHttps = bool.Parse(serviceSection.GetValue("AzureUseHttps"));
 
-                cloudStorageAccount = new CloudStorageAccount(new StorageCredentials(accountName, secretKey), useHttps);
-            }
-            catch (Exception e)
-            {
-                throw new StorageException(string.Format("Failed to initialize storage service {0}.", GetType()), e);
-            }
-        }
+				if (!TimeSpan.TryParse(serviceSection.GetValue("AzureTokenExpiryTime"), out tokenExpiryTime))
+				{
+					tokenExpiryTime = TimeSpan.FromMinutes(10);
+				}
 
-        public bool ObjectExists(Uri uri)
-        {
-            CheckUri(uri);
+				timeout = serviceSection.ProcessTimeout;
 
-            try
-            {
-                var client = cloudStorageAccount.CreateCloudBlobClient();
-                client.ParallelOperationThreadCount = 1;
+				accessControlEnabledGlobally = config.Security.AccessControlEnabled;
+				containerName = serviceSection.GetValue("AzureContainerName");
+				securedContainerName = serviceSection.GetValue("AzureSecuredContainerName");
+				if (string.IsNullOrWhiteSpace(securedContainerName))
+				{
+					securedContainerName = containerName;
+				}
 
-                try
-                {
-                    var blob = client.GetBlobReferenceFromServer(uri, options: new BlobRequestOptions { MaximumExecutionTime = timeout, ServerTimeout = timeout });
-                    return blob.Exists();
-                }
-                catch (Microsoft.WindowsAzure.Storage.StorageException ex)
-                {
-                    if (ex.RequestInformation.HttpStatusCode == (int)HttpStatusCode.NotFound)
-                    {
-                        return false;
-                    }
+				cloudStorageAccount = new CloudStorageAccount(new StorageCredentials(accountName, secretKey), useHttps);
+			}
+			catch (Exception e)
+			{
+				throw new StorageException(string.Format("Failed to initialize storage service {0}.", GetType()), e);
+			}
+		}
 
-                    // Status not found - throw the exception.
-                    throw;
-                }
-            }
-            catch (Exception e)
-            {
-                throw new StorageException(string.Format("Failed to check if object exists {0}.", uri), e);
-            }
-        }
+		public bool ObjectExists(Uri uri)
+		{
+			CheckUri(uri);
 
-        public void UploadObject(UploadRequest request)
-        {
-            CheckUri(request.Uri);
+			try
+			{
+				var client = cloudStorageAccount.CreateCloudBlobClient();
+				client.DefaultRequestOptions.ParallelOperationThreadCount = 1;
 
-            try
-            {
-                var client = cloudStorageAccount.CreateCloudBlobClient();
-                client.ParallelOperationThreadCount = 1;
+				try
+				{
+					var blob = client.GetBlobReferenceFromServer(uri, options: new BlobRequestOptions { MaximumExecutionTime = timeout, ServerTimeout = timeout });
+					return blob.Exists();
+				}
+				catch (Microsoft.WindowsAzure.Storage.StorageException ex)
+				{
+					if (ex.RequestInformation.HttpStatusCode == (int)HttpStatusCode.NotFound)
+					{
+						return false;
+					}
 
-                var securityEnabled = accessControlEnabledGlobally && !request.IgnoreAccessControl;
-                var currentContainerName = securityEnabled ? securedContainerName : containerName;
+					// Status not found - throw the exception.
+					throw;
+				}
+			}
+			catch (Exception e)
+			{
+				throw new StorageException(string.Format("Failed to check if object exists {0}.", uri), e);
+			}
+		}
 
-                // Create container with specified security level 
-                var container = client.GetContainerReference(currentContainerName);
-                if (request.CreateDirectory)
-                {
-                    if (container.CreateIfNotExists())
-                    {
-                        var permissions = new BlobContainerPermissions();
-                        if (securityEnabled)
-                        {
-                            permissions.PublicAccess = BlobContainerPublicAccessType.Off;
-                        }
-                        else
-                        {
-                            permissions.PublicAccess = BlobContainerPublicAccessType.Blob;
-                        }
-                        container.SetPermissions(permissions);
-                    }
-                }
+		public void UploadObject(UploadRequest request)
+		{
+			CheckUri(request.Uri);
 
-                var blob = container.GetBlockBlobReference(request.Uri.AbsoluteUri);
+			try
+			{
+				var client = cloudStorageAccount.CreateCloudBlobClient();
+				client.DefaultRequestOptions.ParallelOperationThreadCount = 1;
 
-                blob.Properties.ContentType = MimeTypeUtility.DetermineContentType(request.Uri);
-                blob.Properties.CacheControl = CacheControl;
+				var securityEnabled = accessControlEnabledGlobally && !request.IgnoreAccessControl;
+				var currentContainerName = securityEnabled ? securedContainerName : containerName;
 
-                if (request.InputStream.Position != 0)
-                {
-                    request.InputStream.Position = 0;
-                }
+				// Create container with specified security level 
+				var container = client.GetContainerReference(currentContainerName);
+				if (request.CreateDirectory)
+				{
+					if (container.CreateIfNotExists())
+					{
+						var permissions = new BlobContainerPermissions();
+						if (securityEnabled)
+						{
+							permissions.PublicAccess = BlobContainerPublicAccessType.Off;
+						}
+						else
+						{
+							permissions.PublicAccess = BlobContainerPublicAccessType.Blob;
+						}
+						container.SetPermissions(permissions);
+					}
+				}
 
-                blob.UploadFromStream(request.InputStream, options: new BlobRequestOptions { MaximumExecutionTime = timeout, ServerTimeout = timeout });
-            }
-            catch (Exception e)
-            {
-                throw new StorageException(string.Format("Failed to upload object with request {0}.", request), e);
-            }
-        }
+				var blob = container.GetBlockBlobReference(GetBlobNameFromUri(request.Uri));
 
-        public DownloadResponse DownloadObject(Uri uri)
-        {
-            CheckUri(uri);
+				blob.Properties.ContentType = MimeTypeUtility.DetermineContentType(request.Uri);
+				blob.Properties.CacheControl = CacheControl;
 
-            try
-            {
-                var timeoutMs = timeout.TotalMilliseconds <= Int32.MaxValue ? Convert.ToInt32(timeout.TotalMilliseconds) : Int32.MaxValue;
+				if (request.InputStream.Position != 0)
+				{
+					request.InputStream.Position = 0;
+				}
 
-                var request = (HttpWebRequest)WebRequest.Create(uri);
-                request.Timeout = timeoutMs;
-                request.ReadWriteTimeout = timeoutMs;
+				blob.UploadFromStream(request.InputStream, options: new BlobRequestOptions { MaximumExecutionTime = timeout, ServerTimeout = timeout });
+			}
+			catch (Exception e)
+			{
+				throw new StorageException(string.Format("Failed to upload object with request {0}.", request), e);
+			}
+		}
 
-                var response = request.GetResponse();
-                var downloadResponse = new DownloadResponse();
-                downloadResponse.Uri = uri;
+		public DownloadResponse DownloadObject(Uri uri)
+		{
+			CheckUri(uri);
 
-                using (var responseStream = response.GetResponseStream())
-                {
-                    downloadResponse.ResponseStream = new MemoryStream();
-                    if (responseStream != null)
-                    {
-                        responseStream.CopyTo(downloadResponse.ResponseStream);
-                    }
-                }
+			try
+			{
+				var timeoutMs = timeout.TotalMilliseconds <= Int32.MaxValue ? Convert.ToInt32(timeout.TotalMilliseconds) : Int32.MaxValue;
 
-                return downloadResponse;
-            }
-            catch (Exception e)
-            {
-                throw new StorageException(string.Format("Failed to download object from {0}.", uri), e);
-            }
-        }
+				var request = (HttpWebRequest)WebRequest.Create(uri);
+				request.Timeout = timeoutMs;
+				request.ReadWriteTimeout = timeoutMs;
 
-        public void CopyObject(Uri sourceUri, Uri destinationUri)
-        {
-            CheckUri(sourceUri);
-            CheckUri(destinationUri);
+				var response = request.GetResponse();
+				var downloadResponse = new DownloadResponse();
+				downloadResponse.Uri = uri;
 
-            try
-            {
-                var client = cloudStorageAccount.CreateCloudBlobClient();
-                var container = client.GetContainerReference(containerName);
-                var destinationBlob = container.GetBlockBlobReference(destinationUri.AbsoluteUri);
+				using (var responseStream = response.GetResponseStream())
+				{
+					downloadResponse.ResponseStream = new MemoryStream();
+					if (responseStream != null)
+					{
+						responseStream.CopyTo(downloadResponse.ResponseStream);
+					}
+				}
 
-                destinationBlob.StartCopyFromBlob(sourceUri, options: new BlobRequestOptions { MaximumExecutionTime = timeout, ServerTimeout = timeout });
-            }
-            catch (Exception e)
-            {
-                throw new StorageException(string.Format("Failed to copy object. SourceUrl: {0}, DestinationUrl: {1}", sourceUri, destinationUri), e);
-            }
-        }
+				return downloadResponse;
+			}
+			catch (Exception e)
+			{
+				throw new StorageException(string.Format("Failed to download object from {0}.", uri), e);
+			}
+		}
 
-        public void RemoveObject(Uri uri)
-        {
-            CheckUri(uri);
-            try
-            {
-                var client = cloudStorageAccount.CreateCloudBlobClient();
-                var container = client.GetContainerReference(containerName);
-                var blob = container.GetBlockBlobReference(uri.AbsoluteUri);
+		public void CopyObject(Uri sourceUri, Uri destinationUri)
+		{
+			CheckUri(sourceUri);
+			CheckUri(destinationUri);
 
-                blob.DeleteIfExists(options: new BlobRequestOptions { MaximumExecutionTime = timeout, ServerTimeout = timeout });
-            }
-            catch (Exception e)
-            {
-                throw new StorageException(string.Format("Failed to delete object. Uri: {0}", uri), e);
-            }
-        }
+			try
+			{
+				var client = cloudStorageAccount.CreateCloudBlobClient();
+				var container = client.GetContainerReference(containerName);
+				var destinationBlob = container.GetBlockBlobReference(GetBlobNameFromUri(destinationUri));
 
-        public void RemoveFolder(Uri uri)
-        {
-            CheckUri(uri);
+				destinationBlob.StartCopyFromBlob(sourceUri, options: new BlobRequestOptions { MaximumExecutionTime = timeout, ServerTimeout = timeout });
+			}
+			catch (Exception e)
+			{
+				throw new StorageException(string.Format("Failed to copy object. SourceUrl: {0}, DestinationUrl: {1}", sourceUri, destinationUri), e);
+			}
+		}
 
-            var client = cloudStorageAccount.CreateCloudBlobClient();
-            var container = client.GetContainerReference(containerName);
-            var prefix = GetBlobDirectory(uri.AbsolutePath);
+		public void RemoveObject(Uri uri)
+		{
+			CheckUri(uri);
+			try
+			{
+				var client = cloudStorageAccount.CreateCloudBlobClient();
+				var container = client.GetContainerReference(containerName);
+				var blob = container.GetBlockBlobReference(GetBlobNameFromUri(uri));
 
-            var blobs = client.GetContainerReference(containerName);
+				blob.DeleteIfExists(options: new BlobRequestOptions { MaximumExecutionTime = timeout, ServerTimeout = timeout });
+			}
+			catch (Exception e)
+			{
+				throw new StorageException(string.Format("Failed to delete object. Uri: {0}", uri), e);
+			}
+		}
 
-            var blobsList = blobs.GetDirectoryReference(prefix).ListBlobs(true, options: new BlobRequestOptions { MaximumExecutionTime = timeout, ServerTimeout = timeout });
-            try
-            {
-                foreach (var blob in blobsList)
-                {
-                    container.GetBlockBlobReference(blob.Uri.AbsoluteUri).DeleteIfExists();
-                }
-            }
-            catch (Exception e)
-            {
-                throw new StorageException(string.Format("Failed to delete folder. Uri: {0}", uri), e);
-            }
-        }
+		public void RemoveFolder(Uri uri)
+		{
+			CheckUri(uri);
 
-        public bool SecuredUrlsEnabled
-        {
-            get { return true; }
-        }
+			var client = cloudStorageAccount.CreateCloudBlobClient();
+			var container = client.GetContainerReference(containerName);
+			var prefix = GetBlobDirectory(uri.AbsolutePath);
 
-        public string SecuredContainerIssueWarning
-        {
-            get
-            {
-                if (securedContainerIssue == null)
-                {
-                    securedContainerIssue = string.Empty;
-                    if (accessControlEnabledGlobally)
-                    {
-                        try
-                        {
-                            var client = cloudStorageAccount.CreateCloudBlobClient();
-                            var container = client.GetContainerReference(securedContainerName);
-                            var permission = container.GetPermissions();
-                            if (permission.PublicAccess == BlobContainerPublicAccessType.Container)
-                            {
-                                securedContainerIssue = AzureGlobalization.TokenBasedSecurity_HasSecuredContainerIssue_Message;
-                            }
-                        }
-                        catch (Exception e)
-                        {
-                            throw new StorageException(string.Format("Failed to check container permissions."), e);
-                        }
-                    }
-                }
+			var blobs = client.GetContainerReference(containerName);
 
-                return !string.IsNullOrWhiteSpace(securedContainerIssue) ? securedContainerIssue : null;
-            }
-        }
+			var blobsList = blobs.GetDirectoryReference(prefix).ListBlobs(true, options: new BlobRequestOptions { MaximumExecutionTime = timeout, ServerTimeout = timeout });
+			try
+			{
+				foreach (var blob in blobsList)
+				{
+					container.GetBlockBlobReference(GetBlobNameFromUri(blob.Uri)).DeleteIfExists();
+				}
+			}
+			catch (Exception e)
+			{
+				throw new StorageException(string.Format("Failed to delete folder. Uri: {0}", uri), e);
+			}
+		}
 
-        public string GetSecuredUrl(Uri uri)
-        {
-            CheckUri(uri);
+		public bool SecuredUrlsEnabled
+		{
+			get { return true; }
+		}
 
-            try
-            {
-                var client = cloudStorageAccount.CreateCloudBlobClient();
-                client.ParallelOperationThreadCount = 1;
+		public string SecuredContainerIssueWarning
+		{
+			get
+			{
+				if (securedContainerIssue == null)
+				{
+					securedContainerIssue = string.Empty;
+					if (accessControlEnabledGlobally)
+					{
+						try
+						{
+							var client = cloudStorageAccount.CreateCloudBlobClient();
+							var container = client.GetContainerReference(securedContainerName);
+							var permission = container.GetPermissions();
+							if (permission.PublicAccess == BlobContainerPublicAccessType.Container)
+							{
+								securedContainerIssue = AzureGlobalization.TokenBasedSecurity_HasSecuredContainerIssue_Message;
+							}
+						}
+						catch (Exception e)
+						{
+							throw new StorageException(string.Format("Failed to check container permissions."), e);
+						}
+					}
+				}
 
-                var blob = client.GetBlobReferenceFromServer(uri, options: new BlobRequestOptions { MaximumExecutionTime = timeout, ServerTimeout = timeout });
+				return !string.IsNullOrWhiteSpace(securedContainerIssue) ? securedContainerIssue : null;
+			}
+		}
 
-                var sharedAccessPolicy = new SharedAccessBlobPolicy();
-                sharedAccessPolicy.Permissions = SharedAccessBlobPermissions.Read;
-                sharedAccessPolicy.SharedAccessStartTime = DateTime.UtcNow.AddMinutes(-1);
-                sharedAccessPolicy.SharedAccessExpiryTime = DateTime.UtcNow.Add(tokenExpiryTime);
-                
-                var sas = blob.GetSharedAccessSignature(sharedAccessPolicy);
-                return string.Concat(uri, sas);
-            }
-            catch (Exception e)
-            {
-                throw new StorageException(string.Format("Failed to get shared access signature for. Uri: {0}.", uri), e);
-            }
-        }
+		public string GetSecuredUrl(Uri uri)
+		{
+			CheckUri(uri);
 
-        private string GetBlobDirectory(string path)
-        {
-            var index = path.LastIndexOf('/');
-            var result = path.Remove(index);
-            result = result.TrimStart('/');
-            index = result.IndexOf('/');
-            result = result.Substring(index + 1);
+			try
+			{
+				var client = cloudStorageAccount.CreateCloudBlobClient();
+				client.DefaultRequestOptions.ParallelOperationThreadCount = 1;
 
-            return result;
-        }
+				var blob = client.GetBlobReferenceFromServer(uri, options: new BlobRequestOptions { MaximumExecutionTime = timeout, ServerTimeout = timeout });
 
-        private void CheckUri(Uri uri)
-        {
-            if (!Uri.CheckSchemeName(uri.Scheme) || !(uri.Scheme.Equals(Uri.UriSchemeHttp) || uri.Scheme.Equals(Uri.UriSchemeHttps)))
-            {
-                throw new StorageException(string.Format("An Uri scheme {0} is invalid. Uri {1} can't be processed with a {2} storage service.", uri.Scheme, uri, GetType().Name));
-            }
-        }
-    }
+				var sharedAccessPolicy = new SharedAccessBlobPolicy();
+				sharedAccessPolicy.Permissions = SharedAccessBlobPermissions.Read;
+				sharedAccessPolicy.SharedAccessStartTime = DateTime.UtcNow.AddMinutes(-1);
+				sharedAccessPolicy.SharedAccessExpiryTime = DateTime.UtcNow.Add(tokenExpiryTime);
+
+				var sas = blob.GetSharedAccessSignature(sharedAccessPolicy);
+				return string.Concat(uri, sas);
+			}
+			catch (Exception e)
+			{
+				throw new StorageException(string.Format("Failed to get shared access signature for. Uri: {0}.", uri), e);
+			}
+		}
+
+		private string GetBlobDirectory(string path)
+		{
+			var index = path.LastIndexOf('/');
+			var result = path.Remove(index);
+			result = result.TrimStart('/');
+			index = result.IndexOf('/');
+			result = result.Substring(index + 1);
+
+			return result;
+		}
+		private static string GetBlobNameFromUri(Uri uri)
+		{
+			return string.Join(string.Empty, uri.Segments, 2, uri.Segments.Length - 2);
+		}
+
+
+		private void CheckUri(Uri uri)
+		{
+			if (!Uri.CheckSchemeName(uri.Scheme) || !(uri.Scheme.Equals(Uri.UriSchemeHttp) || uri.Scheme.Equals(Uri.UriSchemeHttps)))
+			{
+				throw new StorageException(string.Format("An Uri scheme {0} is invalid. Uri {1} can't be processed with a {2} storage service.", uri.Scheme, uri, GetType().Name));
+			}
+		}
+	}
 }

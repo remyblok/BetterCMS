@@ -53,7 +53,7 @@ namespace BetterCms.Module.WindowsAzureStorage
                 return "WindowsAzureStorage";
             }
         }
-         
+
         /// <summary>
         /// Gets the description.
         /// </summary>
