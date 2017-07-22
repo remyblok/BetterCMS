@@ -25,6 +25,8 @@
 // Email: info@bettercms.com
 // </summary>
 // --------------------------------------------------------------------------------------------------------------------
+
+using System;
 using System.Collections.Generic;
 using System.Web.Mvc;
 using System.Web.UI;
@@ -80,6 +82,23 @@ namespace BetterCms.Module.Root.Controllers
         {
             this.embeddedResourcesProvider = embeddedResourcesProvider;
         }
+
+        /// <summary>
+        /// Adds the file extension and mimetype to the list of supported file types that can be served
+        /// </summary>
+        /// <param name="fileExtension">The file extension</param>
+        /// <param name="mimeType">The Mime type of the files with this extension</param>
+        public static void AddEmbeddedResourceMimeType(string fileExtension, string mimeType)
+        {
+            if (fileExtension == null) throw new ArgumentNullException(nameof(fileExtension));
+            if (mimeType == null) throw new ArgumentNullException(nameof(mimeType));
+
+            if (fileExtension[0] == '.')
+                fileExtension = fileExtension.Substring(1);
+
+            MimeTypes.Add(fileExtension, mimeType);
+        }
+
 
         /// <summary>
         /// Indexes the specified resource name.
